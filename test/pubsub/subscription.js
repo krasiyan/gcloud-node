@@ -666,6 +666,38 @@ describe('Subscription', function() {
     });
   });
 
+  describe('setPushConfig', function() {
+    it('should set the push configuration', function(done) {
+      var pushEndpoint = "https://myproject.appspot.com/myhandler"
+      subscription.makeReq_ = function(method, path, qs, body) {
+        assert.equal(method, 'POST');
+        assert.equal(path, this.name + ':modifyPushConfig');
+        assert.equal(qs, null);
+        assert.deepEqual(body, { pushEndpoint: pushEndpoint });
+        done();
+      };
+      subscription.setPushConfig({ pushEndpoint: pushEndpoint }, done);
+    });
+
+    it('should execute the callback', function(done) {
+      subscription.makeReq_ = function(method, path, qs, body, callback) {
+        callback();
+      };
+      subscription.setPushConfig({}, done);
+    });
+
+    it('should execute the callback with apiResponse', function(done) {
+      var resp = { success: true };
+      subscription.makeReq_ = function(method, path, qs, body, callback) {
+        callback(null, resp);
+      };
+      subscription.setPushConfig({}, function(err, apiResponse) {
+        assert.deepEqual(resp, apiResponse);
+        done();
+      });
+    });
+  });
+
   describe('setAckDeadline', function() {
     it('should set the ack deadline', function(done) {
       subscription.makeReq_ = function(method, path, qs, body) {

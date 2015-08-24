@@ -1,6 +1,6 @@
 {
   "name": "gcloud",
-  "version": "0.18.0",
+  "version": "0.20.0",
   "author": "Google Inc.",
   "description": "Google Cloud APIs Client Library for Node.js",
   "contributors": [
@@ -56,6 +56,7 @@
     "dns-zonefile": "0.1.9",
     "duplexify": "^3.2.0",
     "extend": "^2.0.0",
+    "gce-images": "^0.1.0",
     "google-auth-library": "^0.9.4",
     "is": "^3.0.1",
     "methmeth": "^1.0.0",
@@ -66,13 +67,13 @@
     "propprop": "^0.3.0",
     "protobufjs": "^3.8.2",
     "request": "^2.53.0",
-    "retry-request": "^1.1.0",
+    "retry-request": "^1.2.1",
     "split-array-stream": "^1.0.0",
     "sse4_crc32": "^3.1.0",
     "stream-events": "^1.0.1",
-    "stream-forward": "^2.0.0",
+    "stream-forward": "^3.0.0",
     "string-format-obj": "^1.0.0",
-    "through2": "^0.6.3"
+    "through2": "^2.0.0"
   },
   "devDependencies": {
     "bytebuffer": "^3.5.4",

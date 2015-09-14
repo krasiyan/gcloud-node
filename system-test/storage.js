@@ -29,7 +29,8 @@ var tmp = require('tmp');
 var uuid = require('node-uuid');
 
 var env = require('./env.js');
-var storage = require('../lib/storage')(env);
+var gcloud = require('../lib')(env);
+var storage = gcloud.storage();
 
 var BUCKET_NAME = generateBucketName();
 
@@ -55,7 +56,7 @@ function deleteFile(file, callback) {
 function writeToFile(file, contents, callback) {
   var writeStream = file.createWriteStream();
   writeStream.once('error', callback);
-  writeStream.once('complete', callback.bind(null, null));
+  writeStream.once('finish', callback.bind(null, null));
   writeStream.end(contents);
 }
 
@@ -103,7 +104,7 @@ describe('storage', function() {
         });
       });
 
-      it.skip('should add entity to default access controls', function(done) {
+      it('should add entity to default access controls', function(done) {
         bucket.acl.default.add({
           entity: USER_ACCOUNT,
           role: storage.acl.OWNER_ROLE
@@ -138,7 +139,7 @@ describe('storage', function() {
         });
       });
 
-      it.skip('should grant an account access', function(done) {
+      it('should grant an account access', function(done) {
         bucket.acl.add({
           entity: USER_ACCOUNT,
           role: storage.acl.OWNER_ROLE
@@ -157,7 +158,7 @@ describe('storage', function() {
         });
       });
 
-      it.skip('should update an account', function(done) {
+      it('should update an account', function(done) {
         bucket.acl.add({
           entity: USER_ACCOUNT,
           role: storage.acl.OWNER_ROLE
@@ -315,7 +316,7 @@ describe('storage', function() {
         assert.equal(typeof file.default, 'undefined');
       });
 
-      it.skip('should grant an account access', function(done) {
+      it('should grant an account access', function(done) {
         file.acl.add({
           entity: USER_ACCOUNT,
           role: storage.acl.OWNER_ROLE
@@ -332,7 +333,7 @@ describe('storage', function() {
         });
       });
 
-      it.skip('should update an account', function(done) {
+      it('should update an account', function(done) {
         file.acl.add({
           entity: USER_ACCOUNT,
           role: storage.acl.OWNER_ROLE
@@ -462,7 +463,7 @@ describe('storage', function() {
       writeStream.end();
 
       writeStream.on('error', done);
-      writeStream.on('complete', function() {
+      writeStream.on('finish', function() {
         var data = new Buffer('');
 
         file.createReadStream()
@@ -470,7 +471,7 @@ describe('storage', function() {
           .on('data', function(chunk) {
             data = Buffer.concat([data, chunk]);
           })
-          .on('complete', function() {
+          .on('end', function() {
             assert.equal(data.toString(), contents);
             done();
           });
@@ -509,7 +510,7 @@ describe('storage', function() {
             sizeStreamed += chunk.length;
           })
           .on('error', done)
-          .on('complete', function() {
+          .on('end', function() {
             assert.equal(sizeStreamed, expectedContentSize);
             file.delete(done);
           });
@@ -583,8 +584,8 @@ describe('storage', function() {
         fs.createReadStream(files.big.path)
           .pipe(file.createWriteStream({ resumable: false }))
           .on('error', done)
-          .on('complete', function(fileObject) {
-            assert.equal(fileObject.md5Hash, files.big.hash);
+          .on('finish', function() {
+            assert.equal(file.metadata.md5Hash, files.big.hash);
             file.delete(done);
           });
       });
@@ -610,21 +611,23 @@ describe('storage', function() {
         fs.stat(files.big.path, function(err, metadata) {
           assert.ifError(err);
 
+          // Use a random name to force an empty ConfigStore cache.
+          var file = bucket.file('LargeFile' + Date.now());
           var fileSize = metadata.size;
-          var file = bucket.file('LargeFile');
 
           upload({ interrupt: true }, function(err) {
-            assert.ifError(err);
+            assert.strictEqual(err.message, 'Interrupted.');
 
-            upload({ interrupt: false }, function(err, metadata) {
+            upload({ interrupt: false }, function(err) {
               assert.ifError(err);
 
-              assert.equal(metadata.size, fileSize);
+              assert.equal(file.metadata.size, fileSize);
               file.delete(done);
             });
           });
 
           function upload(opts, callback) {
+            var ws = file.createWriteStream();
             var sizeStreamed = 0;
 
             fs.createReadStream(files.big.path)
@@ -633,17 +636,17 @@ describe('storage', function() {
 
                 if (opts.interrupt && sizeStreamed >= fileSize / 2) {
                   // stop sending data half way through.
-                  next();
+                  this.push(chunk);
+                  this.destroy();
+                  ws.destroy(new Error('Interrupted.'));
                 } else {
                   this.push(chunk);
                   next();
                 }
               }))
-              .pipe(file.createWriteStream())
+              .pipe(ws)
               .on('error', callback)
-              .on('complete', function(fileObject) {
-                callback(null, fileObject);
-              });
+              .on('finish', callback);
           }
         });
       });
@@ -661,7 +664,7 @@ describe('storage', function() {
           writable.write(fileContent);
           writable.end();
 
-          writable.on('complete', function() {
+          writable.on('finish', function() {
             file.createReadStream()
               .on('error', done)
               .pipe(fs.createWriteStream(tmpFilePath))
@@ -738,7 +741,7 @@ describe('storage', function() {
         fs.createReadStream(files.logo.path)
           .pipe(file.createWriteStream())
           .on('error', done)
-          .on('complete', function() {
+          .on('finish', function() {
             file.copy(filenames[1], function(err, copiedFile) {
               assert.ifError(err);
               copiedFile.copy(filenames[2], done);
@@ -890,16 +893,17 @@ describe('storage', function() {
       fs.createReadStream(files.logo.path)
         .pipe(file.createWriteStream())
         .on('error', done)
-        .on('complete', done.bind(null, null));
+        .on('finish', done.bind(null, null));
     });
 
     it('should create a signed read url', function(done) {
       file.getSignedUrl({
         action: 'read',
-        expires: Math.round(Date.now() / 1000) + 5
+        expires: Date.now() + 5000
       }, function(err, signedReadUrl) {
         assert.ifError(err);
         request.get(signedReadUrl, function(err, resp, body) {
+          assert.ifError(err);
           assert.equal(body, localFile);
           file.delete(done);
         });
@@ -909,15 +913,62 @@ describe('storage', function() {
     it('should create a signed delete url', function(done) {
       file.getSignedUrl({
         action: 'delete',
-        expires: Math.round(Date.now() / 1000) + 283473274
+        expires: Date.now() + 5000
       }, function(err, signedDeleteUrl) {
         assert.ifError(err);
-        request.del(signedDeleteUrl, function() {
+        request.del(signedDeleteUrl, function(err) {
+          assert.ifError(err);
           file.getMetadata(function(err) {
             assert.equal(err.code, 404);
             done();
           });
         });
+      });
+    });
+  });
+
+  describe('sign policy', function() {
+    var file;
+
+    before(function(done) {
+      file = bucket.file('LogoToSign.jpg');
+      fs.createReadStream(files.logo.path)
+        .pipe(file.createWriteStream())
+        .on('error', done)
+        .on('finish', done.bind(null, null));
+    });
+
+    after(function(done) {
+      file.delete(done);
+    });
+
+    it('should create a policy', function(done) {
+      var expires = new Date('10-25-2022');
+      var expectedExpiration = new Date(expires).toISOString();
+
+      var options = {
+        equals: ['$Content-Type', 'image/jpeg'],
+        expires: expires,
+        contentLengthRange: {
+          min: 0,
+          max: 1024
+        }
+      };
+
+      file.getSignedPolicy(options, function(err, policy) {
+        assert.ifError(err);
+
+        var policyJson;
+
+        try {
+          policyJson = JSON.parse(policy.string);
+        } catch (e) {
+          done(e);
+          return;
+        }
+
+        assert.strictEqual(policyJson.expiration, expectedExpiration);
+        done();
       });
     });
   });

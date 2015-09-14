@@ -18,8 +18,6 @@
 
 var assert = require('assert');
 var Bucket = require('../../lib/storage/bucket.js');
-var crc = require('sse4_crc32');
-var crypto = require('crypto');
 var duplexify = require('duplexify');
 var extend = require('extend');
 var format = require('string-format-obj');
@@ -32,31 +30,6 @@ var through = require('through2');
 var tmp = require('tmp');
 var url = require('url');
 var util = require('../../lib/common/util');
-
-var readableStream;
-var writableStream;
-function FakeDuplexify() {
-  if (!(this instanceof FakeDuplexify)) {
-    return new FakeDuplexify();
-  }
-  stream.Duplex.call(this);
-  this._read = util.noop;
-  this._write = util.noop;
-  this.setReadable = function(setReadableStream) {
-    readableStream = setReadableStream;
-  };
-  this.setWritable = function(setWritableStream) {
-    writableStream = setWritableStream;
-  };
-  this.destroy = function(err) {
-    if (err) {
-      this.emit('error', err);
-    } else {
-      this.end();
-    }
-  };
-}
-nodeutil.inherits(FakeDuplexify, stream.Duplex);
 
 var makeWritableStreamOverride;
 var handleRespOverride;
@@ -84,20 +57,20 @@ fakeRequest.defaults = function(defaultConfiguration) {
   return fakeRequest;
 };
 
-var configStoreData = {};
-function FakeConfigStore() {
-  this.del = function(key) {
-    delete configStoreData[key];
-  };
-
-  this.get = function(key) {
-    return configStoreData[key];
-  };
-
-  this.set = function(key, value) {
-    configStoreData[key] = value;
-  };
+var resumableUploadOverride;
+var resumableUpload = require('gcs-resumable-upload');
+function fakeResumableUpload() {
+  return (resumableUploadOverride || resumableUpload).apply(null, arguments);
 }
+fakeResumableUpload.createURI = function() {
+  var createURI = resumableUpload.createURI;
+
+  if (resumableUploadOverride && resumableUploadOverride.createURI) {
+    createURI = resumableUploadOverride.createURI;
+  }
+
+  return createURI.apply(null, arguments);
+};
 
 describe('File', function() {
   var File;
@@ -107,10 +80,13 @@ describe('File', function() {
   var bucket;
 
   before(function() {
-    mockery.registerMock('sse4_crc32', crc);
-    mockery.registerMock('configstore', FakeConfigStore);
-    mockery.registerMock('duplexify', FakeDuplexify);
+    // If we don't stub see4_crc32 and use mockery, we get "Module did not self-
+    // register".
+    var crc32c = require('hash-stream-validation/node_modules/sse4_crc32');
+    mockery.registerMock('sse4_crc32', crc32c);
+
     mockery.registerMock('request', fakeRequest);
+    mockery.registerMock('gcs-resumable-upload', fakeResumableUpload);
     mockery.registerMock('../common/util.js', fakeUtil);
     mockery.enable({
       useCleanCache: true,
@@ -145,10 +121,7 @@ describe('File', function() {
     handleRespOverride = null;
     makeWritableStreamOverride = null;
     requestOverride = null;
-  });
-
-  it('should have set correct defaults on Request', function() {
-    assert.deepEqual(REQUEST_DEFAULT_CONF, { pool: { maxSockets: Infinity } });
+    resumableUploadOverride = null;
   });
 
   describe('initialization', function() {
@@ -438,10 +411,8 @@ describe('File', function() {
         var self = this;
 
         setImmediate(function() {
-          var responseStream = through();
-          self.emit('response', responseStream);
-          responseStream.push(data);
-          responseStream.push(null);
+          var stream = new FakeRequest();
+          self.emit('response', stream);
 
           setImmediate(function() {
             self.emit('complete', fakeResponse);
@@ -476,6 +447,37 @@ describe('File', function() {
       return FakeFailedRequest;
     }
 
+    it('should throw if both a range and validation is given', function() {
+      assert.throws(function() {
+        file.createReadStream({
+          validation: true,
+          start: 3,
+          end: 8
+        });
+      }, /Cannot use validation with file ranges/);
+
+      assert.throws(function() {
+        file.createReadStream({
+          validation: true,
+          start: 3
+        });
+      }, /Cannot use validation with file ranges/);
+
+      assert.throws(function() {
+        file.createReadStream({
+          validation: true,
+          end: 8
+        });
+      }, /Cannot use validation with file ranges/);
+
+      assert.doesNotThrow(function() {
+        file.createReadStream({
+          start: 3,
+          end: 8
+        });
+      });
+    });
+
     it('should send query.generation if File has one', function(done) {
       var versionedFile = new File(bucket, 'file.txt', { generation: 1 });
 
@@ -484,10 +486,10 @@ describe('File', function() {
         setImmediate(function() {
           done();
         });
-        return new FakeDuplexify();
+        return duplexify();
       };
 
-      versionedFile.createReadStream();
+      versionedFile.createReadStream().resume();
     });
 
     it('should end request stream on error', function(done) {
@@ -495,13 +497,15 @@ describe('File', function() {
 
       var readStream = file.createReadStream();
 
-      readStream.once('error', function() {
+      readStream.resume();
+
+      // Let the error handler from createReadStream assign.
+      setImmediate(function() {
+        readStream.emit('error');
         assert(requestOverride.wasRequestAborted());
         assert(requestOverride.wasRequestDestroyed());
         done();
       });
-
-      readStream.emit('error');
     });
 
     describe('authorizing', function() {
@@ -517,10 +521,10 @@ describe('File', function() {
           setImmediate(function() {
             done();
           });
-          return new FakeDuplexify();
+          return duplexify();
         };
 
-        file.createReadStream();
+        file.createReadStream().resume();
       });
 
       it('should accept gzip encoding', function(done) {
@@ -529,10 +533,10 @@ describe('File', function() {
           setImmediate(function() {
             done();
           });
-          return new FakeDuplexify();
+          return duplexify();
         };
 
-        file.createReadStream();
+        file.createReadStream().resume();
       });
 
       describe('errors', function() {
@@ -555,7 +559,8 @@ describe('File', function() {
             .once('error', function(err) {
               assert.equal(err, ERROR);
               done();
-            });
+            })
+            .resume();
         });
       });
     });
@@ -575,7 +580,7 @@ describe('File', function() {
           return requestOverride(fakeRequest);
         };
 
-        file.createReadStream();
+        file.createReadStream().resume();
       });
 
       it('should emit response event from request', function(done) {
@@ -584,7 +589,8 @@ describe('File', function() {
         file.createReadStream({ validation: false })
           .on('response', function() {
             done();
-          });
+          })
+          .resume();
       });
 
       it('should unpipe stream from an error on the response', function(done) {
@@ -613,7 +619,7 @@ describe('File', function() {
           });
         };
 
-        var readStream = file.createReadStream();
+        var readStream = file.createReadStream().resume();
       });
 
       it('should let util.handleResp handle the response', function(done) {
@@ -634,7 +640,7 @@ describe('File', function() {
           return stream;
         };
 
-        file.createReadStream();
+        file.createReadStream().resume();
       });
 
       describe('errors', function() {
@@ -649,7 +655,8 @@ describe('File', function() {
             .once('error', function(err) {
               assert.deepEqual(err, ERROR);
               done();
-            });
+            })
+            .resume();
         });
       });
     });
@@ -657,18 +664,12 @@ describe('File', function() {
     describe('validation', function() {
       var data = 'test';
 
-      var crc32cBase64 = new Buffer([crc.calculate(data)]).toString('base64');
-
-      var md5HashBase64 = crypto.createHash('md5');
-      md5HashBase64.update(data);
-      md5HashBase64 = md5HashBase64.digest('base64');
-
       var fakeResponse = {
         crc32c: {
-          headers: { 'x-goog-hash': 'crc32c=####' + crc32cBase64 }
+          headers: { 'x-goog-hash': 'crc32c=####wA==' }
         },
         md5: {
-          headers: { 'x-goog-hash': 'md5=' + md5HashBase64 }
+          headers: { 'x-goog-hash': 'md5=CY9rzUYh03PK3k6DJie09g==' }
         }
       };
 
@@ -689,9 +690,8 @@ describe('File', function() {
 
         file.createReadStream({ validation: 'crc32c' })
           .on('error', done)
-          .on('complete', function() {
-            done();
-          });
+          .on('end', done)
+          .resume();
       });
 
       it('should emit an error if crc32c validation fails', function(done) {
@@ -700,9 +700,10 @@ describe('File', function() {
 
         file.createReadStream({ validation: 'crc32c' })
           .on('error', function(err) {
-            assert.equal(err.code, 'CONTENT_DOWNLOAD_MISMATCH');
+            assert.strictEqual(err.code, 'CONTENT_DOWNLOAD_MISMATCH');
             done();
-          });
+          })
+          .resume();
       });
 
       it('should validate with md5', function(done) {
@@ -710,20 +711,20 @@ describe('File', function() {
 
         file.createReadStream({ validation: 'md5' })
           .on('error', done)
-          .on('complete', function() {
-            done();
-          });
+          .on('end', done)
+          .resume();
       });
 
       it('should emit an error if md5 validation fails', function(done) {
         requestOverride = getFakeSuccessfulRequest(
-            'bad-data', fakeResponse.crc32c);
+            'bad-data', fakeResponse.md5);
 
         file.createReadStream({ validation: 'md5' })
           .on('error', function(err) {
-            assert.equal(err.code, 'CONTENT_DOWNLOAD_MISMATCH');
+            assert.strictEqual(err.code, 'CONTENT_DOWNLOAD_MISMATCH');
             done();
-          });
+          })
+          .resume();
       });
 
       it('should default to md5 validation', function(done) {
@@ -733,9 +734,10 @@ describe('File', function() {
 
         file.createReadStream()
           .on('error', function(err) {
-            assert.equal(err.code, 'CONTENT_DOWNLOAD_MISMATCH');
+            assert.strictEqual(err.code, 'CONTENT_DOWNLOAD_MISMATCH');
             done();
-          });
+          })
+          .resume();
       });
 
       describe('destroying the through stream', function() {
@@ -744,14 +746,11 @@ describe('File', function() {
               'bad-data', fakeResponse.crc32c);
 
           var readStream = file.createReadStream({ validation: 'md5' });
-          readStream.end = done;
-        });
-
-        it('should destroy after successful validation', function(done) {
-          requestOverride = getFakeSuccessfulRequest(data, fakeResponse.crc32c);
-
-          var readStream = file.createReadStream({ validation: 'crc32c' });
-          readStream.end = done;
+          readStream.destroy = function(err) {
+            assert.strictEqual(err.code, 'CONTENT_DOWNLOAD_MISMATCH');
+            done();
+          };
+          readStream.resume();
         });
       });
     });
@@ -768,7 +767,7 @@ describe('File', function() {
           return duplexify();
         };
 
-        file.createReadStream({ start: startOffset });
+        file.createReadStream({ start: startOffset }).resume();
       });
 
       it('should accept an end range and set start to 0', function(done) {
@@ -782,7 +781,7 @@ describe('File', function() {
           return duplexify();
         };
 
-        file.createReadStream({ end: endOffset });
+        file.createReadStream({ end: endOffset }).resume();
       });
 
       it('should accept both a start and end range', function(done) {
@@ -798,7 +797,7 @@ describe('File', function() {
           return duplexify();
         };
 
-        file.createReadStream({ start: startOffset, end: endOffset });
+        file.createReadStream({ start: startOffset, end: endOffset }).resume();
       });
 
       it('should accept range start and end as 0', function(done) {
@@ -814,7 +813,7 @@ describe('File', function() {
           return duplexify();
         };
 
-        file.createReadStream({ start: startOffset, end: endOffset });
+        file.createReadStream({ start: startOffset, end: endOffset }).resume();
       });
 
       it('should end the through stream', function(done) {
@@ -822,6 +821,7 @@ describe('File', function() {
 
         var readStream = file.createReadStream({ start: 100 });
         readStream.end = done;
+        readStream.resume();
       });
     });
 
@@ -837,8 +837,47 @@ describe('File', function() {
           return duplexify();
         };
 
-        file.createReadStream({ end: endOffset });
+        file.createReadStream({ end: endOffset }).resume();
       });
+    });
+  });
+
+  describe('createResumableUpload', function() {
+    it('should not require metadata', function(done) {
+      resumableUploadOverride = {
+        createURI: function(opts, callback) {
+          assert.deepEqual(opts.metadata, {});
+          callback();
+        }
+      };
+
+      file.createResumableUpload(done);
+    });
+
+    it('should create a resumable upload URI', function(done) {
+      var metadata = {
+        contentType: 'application/json'
+      };
+
+      file.generation = 3;
+
+      resumableUploadOverride = {
+        createURI: function(opts, callback) {
+          var bucket = file.bucket;
+          var storage = bucket.storage;
+          var authClient = storage.makeAuthorizedRequest_.authClient;
+
+          assert.strictEqual(opts.authClient, authClient);
+          assert.strictEqual(opts.bucket, bucket.name);
+          assert.strictEqual(opts.file, file.name);
+          assert.strictEqual(opts.generation, file.generation);
+          assert.strictEqual(opts.metadata, metadata);
+
+          callback();
+        }
+      };
+
+      file.createResumableUpload(metadata, done);
     });
   });
 
@@ -851,57 +890,21 @@ describe('File', function() {
 
     it('should emit errors', function(done) {
       var error = new Error('Error.');
+      var uploadStream = new stream.PassThrough();
 
-      file.bucket.storage.makeAuthorizedRequest_ = function(reqOpts, cb) {
-        cb(error);
+      file.startResumableUpload_ = function(dup) {
+        dup.setWritable(uploadStream);
+        uploadStream.emit('error', error);
       };
 
       var writable = file.createWriteStream();
 
       writable.on('error', function(err) {
-        assert.equal(err, error);
+        assert.strictEqual(err, error);
         done();
       });
 
       writable.write('data');
-    });
-
-    it('should re-emit errors', function(done) {
-      var error = new Error('Error.');
-      var requestCount = 0;
-      file.bucket.storage.makeAuthorizedRequest_ = function(reqOpts, cb) {
-        requestCount++;
-
-        // respond to creation POST.
-        if (requestCount === 1) {
-          cb(null, null, { headers: { location: 'http://resume' }});
-          return;
-        }
-
-        // create an authorized request for the first PUT.
-        if (requestCount === 2) {
-          cb.onAuthorized(null, { headers: {} });
-        }
-      };
-
-      // respond to first upload PUT request.
-      requestOverride = function() {
-        var stream = through();
-        setImmediate(function() {
-          stream.emit('error', error);
-        });
-        return stream;
-      };
-
-      var stream = duplexify();
-
-      stream
-        .on('error', function(err) {
-          assert.equal(err, error);
-          done();
-        });
-
-      file.startResumableUpload_(stream);
     });
 
     it('should start a simple upload if specified', function(done) {
@@ -956,37 +959,62 @@ describe('File', function() {
       writable.write('data');
     });
 
+    it('should cork data on prefinish', function(done) {
+      var writable = file.createWriteStream();
+
+      file.startResumableUpload_ = function(stream) {
+        assert.strictEqual(writable._corked, 0);
+        stream.emit('prefinish');
+        assert.strictEqual(writable._corked, 1);
+        done();
+      };
+
+      writable.end('data');
+    });
+
     describe('validation', function() {
       var data = 'test';
 
-      var crc32cBase64 = new Buffer([crc.calculate(data)]).toString('base64');
-
-      var md5HashBase64 = crypto.createHash('md5');
-      md5HashBase64.update(data);
-      md5HashBase64 = md5HashBase64.digest('base64');
-
       var fakeMetadata = {
-        crc32c: { crc32c: '####' + crc32cBase64 },
-        md5: { md5Hash: md5HashBase64 }
+        crc32c: { crc32c: '####wA==' },
+        md5: { md5Hash: 'CY9rzUYh03PK3k6DJie09g==' }
       };
+
+      it('should uncork after successful write', function(done) {
+        var writable = file.createWriteStream({ validation: 'crc32c' });
+
+        file.startResumableUpload_ = function(stream) {
+          setImmediate(function() {
+            assert.strictEqual(writable._corked, 1);
+
+            file.metadata = fakeMetadata.crc32c;
+            stream.emit('complete');
+
+            assert.strictEqual(writable._corked, 0);
+            done();
+          });
+        };
+
+        writable.end(data);
+
+        writable.on('error', done);
+      });
 
       it('should validate with crc32c', function(done) {
         var writable = file.createWriteStream({ validation: 'crc32c' });
 
         file.startResumableUpload_ = function(stream) {
           setImmediate(function() {
-            stream.emit('complete', fakeMetadata.crc32c);
+            file.metadata = fakeMetadata.crc32c;
+            stream.emit('complete');
           });
         };
 
-        writable.write(data);
-        writable.end();
+        writable.end(data);
 
         writable
           .on('error', done)
-          .on('complete', function() {
-            done();
-          });
+          .on('finish', done);
       });
 
       it('should emit an error if crc32c validation fails', function(done) {
@@ -994,7 +1022,8 @@ describe('File', function() {
 
         file.startResumableUpload_ = function(stream) {
           setImmediate(function() {
-            stream.emit('complete', fakeMetadata.crc32c);
+            file.metadata = fakeMetadata.crc32c;
+            stream.emit('complete');
           });
         };
 
@@ -1016,7 +1045,8 @@ describe('File', function() {
 
         file.startResumableUpload_ = function(stream) {
           setImmediate(function() {
-            stream.emit('complete', fakeMetadata.md5);
+            file.metadata = fakeMetadata.md5;
+            stream.emit('complete');
           });
         };
 
@@ -1025,9 +1055,7 @@ describe('File', function() {
 
         writable
           .on('error', done)
-          .on('complete', function() {
-            done();
-          });
+          .on('finish', done);
       });
 
       it('should emit an error if md5 validation fails', function(done) {
@@ -1035,7 +1063,8 @@ describe('File', function() {
 
         file.startResumableUpload_ = function(stream) {
           setImmediate(function() {
-            stream.emit('complete', fakeMetadata.md5);
+            file.metadata = fakeMetadata.md5;
+            stream.emit('complete');
           });
         };
 
@@ -1057,7 +1086,8 @@ describe('File', function() {
 
         file.startResumableUpload_ = function(stream) {
           setImmediate(function() {
-            stream.emit('complete', { md5Hash: 'bad-hash' });
+            file.metadata = { md5Hash: 'bad-hash' };
+            stream.emit('complete');
           });
         };
 
@@ -1079,7 +1109,8 @@ describe('File', function() {
 
         file.startResumableUpload_ = function(stream) {
           setImmediate(function() {
-            stream.emit('complete', { md5Hash: 'bad-hash' });
+            file.metadata = { md5Hash: 'bad-hash' };
+            stream.emit('complete');
           });
         };
 
@@ -1096,7 +1127,8 @@ describe('File', function() {
 
         file.startResumableUpload_ = function(stream) {
           setImmediate(function() {
-            stream.emit('complete', { md5Hash: 'bad-hash' });
+            file.metadata = { md5Hash: 'bad-hash' };
+            stream.emit('complete');
           });
         };
 
@@ -1387,7 +1419,7 @@ describe('File', function() {
 
     it('should create a signed policy', function(done) {
       file.getSignedPolicy({
-        expiration: Math.round(Date.now() / 1000) + 5
+        expires: Date.now() + 5
       }, function(err, signedPolicy) {
         assert.ifError(err);
         assert.equal(typeof signedPolicy.string, 'string');
@@ -1397,9 +1429,46 @@ describe('File', function() {
       });
     });
 
+    it('should return an error if getCredentials errors', function(done) {
+      var error = new Error('Error.');
+
+      var storage = bucket.storage;
+      storage.makeAuthorizedRequest_.getCredentials = function(callback) {
+        callback(error);
+      };
+
+      file.getSignedPolicy({
+        expires: Date.now() + 5
+      }, function(err) {
+        var errorMessage = 'Signing failed. See `error` property.';
+        assert.strictEqual(err.message, errorMessage);
+        assert.strictEqual(err.error, error);
+        done();
+      });
+    });
+
+    it('should return an error if credentials are not present', function(done) {
+      var storage = bucket.storage;
+      storage.makeAuthorizedRequest_.getCredentials = function(callback) {
+        callback(null, {});
+      };
+
+      file.getSignedPolicy({
+        expires: Date.now() + 5
+      }, function(err) {
+        var errorMessage = [
+          'Signing failed. Could not find a `private_key`.',
+          'Please verify you are authorized with this property available.'
+        ].join(' ');
+
+        assert.strictEqual(err.message, errorMessage);
+        done();
+      });
+    });
+
     it('should add key equality condition', function(done) {
       file.getSignedPolicy({
-        expiration: Math.round(Date.now() / 1000) + 5
+        expires: Date.now() + 5
       }, function(err, signedPolicy) {
         var conditionString = '[\"eq\",\"$key\",\"' + file.name + '\"]';
         assert.ifError(err);
@@ -1410,7 +1479,7 @@ describe('File', function() {
 
     it('should add ACL condtion', function(done) {
       file.getSignedPolicy({
-        expiration: Math.round(Date.now() / 1000) + 5,
+        expires: Date.now() + 5,
         acl: '<acl>'
       }, function(err, signedPolicy) {
         var conditionString = '{\"acl\":\"<acl>\"}';
@@ -1420,24 +1489,52 @@ describe('File', function() {
       });
     });
 
-    describe('expiration', function() {
-      it('should ISO encode expiration', function(done) {
-        var expiration = Math.round(Date.now() / 1000) + 5;
-        var expireDate = new Date(expiration);
+    describe('expires', function() {
+      it('should accept Date objects', function(done) {
+        var expires = new Date(Date.now() + 1000 * 60);
+
         file.getSignedPolicy({
-          expiration: expiration
-        }, function(err, signedPolicy) {
+          expires: expires
+        }, function(err, policy) {
           assert.ifError(err);
-          assert(signedPolicy.string.indexOf(expireDate.toISOString()) > -1);
+          var expires_ = JSON.parse(policy.string).expiration;
+          assert.strictEqual(expires_, expires.toISOString());
+          done();
+        });
+      });
+
+      it('should accept numbers', function(done) {
+        var expires = Date.now() + 1000 * 60;
+
+        file.getSignedPolicy({
+          expires: expires
+        }, function(err, policy) {
+          assert.ifError(err);
+          var expires_ = JSON.parse(policy.string).expiration;
+          assert.strictEqual(expires_, new Date(expires).toISOString());
+          done();
+        });
+      });
+
+      it('should accept strings', function(done) {
+        var expires = '12-12-2099';
+
+        file.getSignedPolicy({
+          expires: expires
+        }, function(err, policy) {
+          assert.ifError(err);
+          var expires_ = JSON.parse(policy.string).expiration;
+          assert.strictEqual(expires_, new Date(expires).toISOString());
           done();
         });
       });
 
       it('should throw if a date from the past is given', function() {
-        var expirationTimestamp = Math.floor(Date.now() / 1000) - 1;
+        var expires = Date.now() - 5;
+
         assert.throws(function() {
           file.getSignedPolicy({
-            expiration: expirationTimestamp
+            expires: expires
           }, function() {});
         }, /cannot be in the past/);
       });
@@ -1445,9 +1542,8 @@ describe('File', function() {
 
     describe('equality condition', function() {
       it('should add equality conditions (array of arrays)', function(done) {
-        var expiration = Math.round(Date.now() / 1000) + 5;
         file.getSignedPolicy({
-          expiration: expiration,
+          expires: Date.now() + 5,
           equals: [['$<field>', '<value>']]
         }, function(err, signedPolicy) {
           var conditionString = '[\"eq\",\"$<field>\",\"<value>\"]';
@@ -1458,9 +1554,8 @@ describe('File', function() {
       });
 
       it('should add equality condition (array)', function(done) {
-        var expiration = Math.round(Date.now() / 1000) + 5;
         file.getSignedPolicy({
-          expiration: expiration,
+          expires: Date.now() + 5,
           equals: ['$<field>', '<value>']
         }, function(err, signedPolicy) {
           var conditionString = '[\"eq\",\"$<field>\",\"<value>\"]';
@@ -1471,20 +1566,18 @@ describe('File', function() {
       });
 
       it('should throw if equal condition is not an array', function() {
-        var expiration = Math.round(Date.now() / 1000) + 5;
         assert.throws(function() {
           file.getSignedPolicy({
-            expiration: expiration,
+            expires: Date.now() + 5,
             equals: [{}]
           }, function() {});
         }, /Equals condition must be an array/);
       });
 
       it('should throw if equal condition length is not 2', function() {
-        var expiration = Math.round(Date.now() / 1000) + 5;
         assert.throws(function() {
           file.getSignedPolicy({
-            expiration: expiration,
+            expires: Date.now() + 5,
             equals: [['1', '2', '3']]
           }, function() {});
         }, /Equals condition must be an array of 2 elements/);
@@ -1493,9 +1586,8 @@ describe('File', function() {
 
     describe('prefix conditions', function() {
       it('should add prefix conditions (array of arrays)', function(done) {
-        var expiration = Math.round(Date.now() / 1000) + 5;
         file.getSignedPolicy({
-          expiration: expiration,
+          expires: Date.now() + 5,
           startsWith: [['$<field>', '<value>']]
         }, function(err, signedPolicy) {
           var conditionString = '[\"starts-with\",\"$<field>\",\"<value>\"]';
@@ -1506,9 +1598,8 @@ describe('File', function() {
       });
 
       it('should add prefix condition (array)', function(done) {
-        var expiration = Math.round(Date.now() / 1000) + 5;
         file.getSignedPolicy({
-          expiration: expiration,
+          expires: Date.now() + 5,
           startsWith: ['$<field>', '<value>']
         }, function(err, signedPolicy) {
           var conditionString = '[\"starts-with\",\"$<field>\",\"<value>\"]';
@@ -1519,20 +1610,18 @@ describe('File', function() {
       });
 
       it('should throw if prexif condition is not an array', function() {
-        var expiration = Math.round(Date.now() / 1000) + 5;
         assert.throws(function() {
           file.getSignedPolicy({
-            expiration: expiration,
+            expires: Date.now() + 5,
             startsWith: [{}]
           }, function() {});
         }, /StartsWith condition must be an array/);
       });
 
       it('should throw if prefix condition length is not 2', function() {
-        var expiration = Math.round(Date.now() / 1000) + 5;
         assert.throws(function() {
           file.getSignedPolicy({
-            expiration: expiration,
+            expires: Date.now() + 5,
             startsWith: [['1', '2', '3']]
           }, function() {});
         }, /StartsWith condition must be an array of 2 elements/);
@@ -1541,9 +1630,8 @@ describe('File', function() {
 
     describe('content length', function() {
       it('should add content length condition', function(done) {
-        var expiration = Math.round(Date.now() / 1000) + 5;
         file.getSignedPolicy({
-          expiration: expiration,
+          expires: Date.now() + 5,
           contentLengthRange: {min: 0, max: 1}
         }, function(err, signedPolicy) {
           var conditionString = '[\"content-length-range\",0,1]';
@@ -1554,20 +1642,18 @@ describe('File', function() {
       });
 
       it('should throw if content length has no min', function() {
-        var expiration = Math.round(Date.now() / 1000) + 5;
         assert.throws(function() {
           file.getSignedPolicy({
-            expiration: expiration,
+            expires: Date.now() + 5,
             contentLengthRange: [{max: 1}]
           }, function() {});
         }, /ContentLengthRange must have numeric min & max fields/);
       });
 
       it('should throw if content length has no max', function() {
-        var expiration = Math.round(Date.now() / 1000) + 5;
         assert.throws(function() {
           file.getSignedPolicy({
-            expiration: expiration,
+            expires: Date.now() + 5,
             contentLengthRange: [{min: 0}]
           }, function() {});
         }, /ContentLengthRange must have numeric min & max fields/);
@@ -1588,7 +1674,7 @@ describe('File', function() {
     it('should create a signed url', function(done) {
       file.getSignedUrl({
         action: 'read',
-        expires: Math.round(Date.now() / 1000) + 5
+        expires: Date.now() + 5
       }, function(err, signedUrl) {
         assert.ifError(err);
         assert.equal(typeof signedUrl, 'string');
@@ -1596,10 +1682,49 @@ describe('File', function() {
       });
     });
 
+    it('should return an error if getCredentials errors', function(done) {
+      var error = new Error('Error.');
+
+      var storage = bucket.storage;
+      storage.makeAuthorizedRequest_.getCredentials = function(callback) {
+        callback(error);
+      };
+
+      file.getSignedUrl({
+        action: 'read',
+        expires: Date.now() + 5
+      }, function(err) {
+        var errorMessage = 'Signing failed. See `error` property.';
+        assert.strictEqual(err.message, errorMessage);
+        assert.strictEqual(err.error, error);
+        done();
+      });
+    });
+
+    it('should return an error if credentials are not present', function(done) {
+      var storage = bucket.storage;
+      storage.makeAuthorizedRequest_.getCredentials = function(callback) {
+        callback(null, {});
+      };
+
+      file.getSignedUrl({
+        action: 'read',
+        expires: Date.now() + 5
+      }, function(err) {
+        var errorMessage = [
+          'Signing failed. Could not find a `private_key` or `client_email`.',
+          'Please verify you are authorized with these credentials available.'
+        ].join(' ');
+
+        assert.strictEqual(err.message, errorMessage);
+        done();
+      });
+    });
+
     it('should URI encode file names', function(done) {
       directoryFile.getSignedUrl({
         action: 'read',
-        expires: Math.round(Date.now() / 1000) + 5
+        expires: Date.now() + 5,
       }, function(err, signedUrl) {
         assert(signedUrl.indexOf(encodeURIComponent(directoryFile.name)) > -1);
         done();
@@ -1610,7 +1735,7 @@ describe('File', function() {
       var type = 'application/json';
       directoryFile.getSignedUrl({
         action: 'read',
-        expires: Math.round(Date.now() / 1000) + 5,
+        expires: Date.now() + 5,
         responseType: type
       }, function(err, signedUrl) {
         assert(signedUrl.indexOf(encodeURIComponent(type)) > -1);
@@ -1623,7 +1748,7 @@ describe('File', function() {
         var disposition = 'attachment; filename="fname.ext"';
         directoryFile.getSignedUrl({
           action: 'read',
-          expires: Math.round(Date.now() / 1000) + 5,
+          expires: Date.now() + 5,
           promptSaveAs: 'fname.ext'
         }, function(err, signedUrl) {
           assert(signedUrl.indexOf(disposition) > -1);
@@ -1637,7 +1762,7 @@ describe('File', function() {
         var disposition = 'attachment; filename="fname.ext"';
         directoryFile.getSignedUrl({
           action: 'read',
-          expires: Math.round(Date.now() / 1000) + 5,
+          expires: Date.now() + 5,
           responseDisposition: disposition
         }, function(err, signedUrl) {
           assert(signedUrl.indexOf(encodeURIComponent(disposition)) > -1);
@@ -1650,7 +1775,7 @@ describe('File', function() {
         var saveAs = 'fname2.ext';
         directoryFile.getSignedUrl({
           action: 'read',
-          expires: Math.round(Date.now() / 1000) + 5,
+          expires: Date.now() + 5,
           promptSaveAs: saveAs,
           responseDisposition: disposition
         }, function(err, signedUrl) {
@@ -1662,27 +1787,58 @@ describe('File', function() {
     });
 
     describe('expires', function() {
-      var nowInSeconds = Math.floor(Date.now() / 1000);
+      it('should accept Date objects', function(done) {
+        var expires = new Date(Date.now() + 1000 * 60);
+        var expectedExpires = Math.round(expires / 1000);
 
-      it('should use the provided expiration date', function(done) {
-        var expirationTimestamp = nowInSeconds + 60;
         file.getSignedUrl({
           action: 'read',
-          expires: expirationTimestamp
+          expires: expires
         }, function(err, signedUrl) {
           assert.ifError(err);
-          var expires = url.parse(signedUrl, true).query.Expires;
-          assert.equal(expires, expirationTimestamp);
+          var expires_ = url.parse(signedUrl, true).query.Expires;
+          assert.equal(expires_, expectedExpires);
+          done();
+        });
+      });
+
+      it('should accept numbers', function(done) {
+        var expires = Date.now() + 1000 * 60;
+        var expectedExpires = Math.round(new Date(expires) / 1000);
+
+        file.getSignedUrl({
+          action: 'read',
+          expires: expires
+        }, function(err, signedUrl) {
+          assert.ifError(err);
+          var expires_ = url.parse(signedUrl, true).query.Expires;
+          assert.equal(expires_, expectedExpires);
+          done();
+        });
+      });
+
+      it('should accept strings', function(done) {
+        var expires = '12-12-2099';
+        var expectedExpires = Math.round(new Date(expires) / 1000);
+
+        file.getSignedUrl({
+          action: 'read',
+          expires: expires
+        }, function(err, signedUrl) {
+          assert.ifError(err);
+          var expires_ = url.parse(signedUrl, true).query.Expires;
+          assert.equal(expires_, expectedExpires);
           done();
         });
       });
 
       it('should throw if a date from the past is given', function() {
-        var expirationTimestamp = nowInSeconds - 1;
+        var expires = Date.now() - 5;
+
         assert.throws(function() {
           file.getSignedUrl({
             action: 'read',
-            expires: expirationTimestamp
+            expires: expires
           }, function() {});
         }, /cannot be in the past/);
       });
@@ -1804,161 +1960,82 @@ describe('File', function() {
   });
 
   describe('startResumableUpload_', function() {
-    var RESUMABLE_URI = 'http://resume';
-
-    beforeEach(function() {
-      configStoreData = {};
-    });
-
     describe('starting', function() {
       it('should start a resumable upload', function(done) {
-        file.bucket.storage.makeAuthorizedRequest_ = function(reqOpts) {
-          var uri = 'https://www.googleapis.com/upload/storage/v1/b/' +
-            file.bucket.name + '/o';
-
-          assert.equal(reqOpts.method, 'POST');
-          assert.equal(reqOpts.uri, uri);
-          assert.equal(reqOpts.qs.name, file.name);
-          assert.equal(reqOpts.qs.uploadType, 'resumable');
-
-          assert.deepEqual(reqOpts.headers, {
-            'X-Upload-Content-Type': 'custom'
-          });
-          assert.deepEqual(reqOpts.json, { contentType: 'custom' });
-
-          done();
+        var metadata = {
+          contentType: 'application/json'
         };
 
-        file.startResumableUpload_(duplexify(), { contentType: 'custom' });
+        file.generation = 3;
+
+        resumableUploadOverride = function(opts) {
+          var bucket = file.bucket;
+          var storage = bucket.storage;
+          var authClient = storage.makeAuthorizedRequest_.authClient;
+
+          assert.strictEqual(opts.authClient, authClient);
+          assert.strictEqual(opts.bucket, bucket.name);
+          assert.strictEqual(opts.file, file.name);
+          assert.strictEqual(opts.generation, file.generation);
+          assert.strictEqual(opts.metadata, metadata);
+
+          setImmediate(done);
+          return through();
+        };
+
+        file.startResumableUpload_(duplexify(), metadata);
       });
 
-      it('should send query.ifGenerationMatch if File has one', function(done) {
-        var versionedFile = new File(bucket, 'new-file.txt', { generation: 1 });
+      it('should set the metadata from the response', function(done) {
+        var metadata = {};
+        var uploadStream = through();
 
-        versionedFile.bucket.storage.makeAuthorizedRequest_ = function(rOpts) {
-          assert.equal(rOpts.qs.ifGenerationMatch, 1);
-          done();
-        };
-
-        versionedFile.startResumableUpload_(duplexify(), {});
-      });
-
-      it('should upload file', function(done) {
-        var requestCount = 0;
-        file.bucket.storage.makeAuthorizedRequest_ = function(reqOpts, cb) {
-          requestCount++;
-
-          // respond to creation POST.
-          if (requestCount === 1) {
-            cb(null, null, { headers: { location: RESUMABLE_URI }});
-            assert.deepEqual(configStoreData[file.name].uri, RESUMABLE_URI);
-            return;
-          }
-
-          // create an authorized request for the first PUT.
-          if (requestCount === 2) {
-            assert.equal(reqOpts.method, 'PUT');
-            assert.equal(reqOpts.uri, RESUMABLE_URI);
-            cb.onAuthorized(null, { headers: {} });
-          }
-        };
-
-        // respond to first upload PUT request.
-        var metadata = { a: 'b', c: 'd' };
-        requestOverride = function(reqOpts) {
-          assert.equal(reqOpts.headers['Content-Range'], 'bytes 0-*/*');
-
-          var stream = through();
+        resumableUploadOverride = function() {
           setImmediate(function() {
-            stream.emit('complete', { body: metadata });
-          });
-          return stream;
-        };
-
-        var stream = duplexify();
-
-        stream
-          .on('error', done)
-          .on('complete', function(data) {
-            assert.deepEqual(data, metadata);
+            uploadStream.emit('response', null, metadata);
 
             setImmediate(function() {
-              // cache deleted.
-              assert(!configStoreData[file.name]);
+              assert.strictEqual(file.metadata, metadata);
               done();
             });
           });
-
-        file.startResumableUpload_(stream);
-      });
-    });
-
-    describe('resuming', function() {
-      beforeEach(function() {
-        configStoreData[file.name] = {
-          uri: RESUMABLE_URI
-        };
-      });
-
-      it('should resume uploading from last sent byte', function(done) {
-        var lastByte = 135;
-
-        var requestCount = 0;
-        file.bucket.storage.makeAuthorizedRequest_ = function(reqOpts, cb) {
-          requestCount++;
-
-          if (requestCount === 1) {
-            assert.equal(reqOpts.method, 'PUT');
-            assert.equal(reqOpts.uri, RESUMABLE_URI);
-            assert.deepEqual(reqOpts.headers, {
-              'Content-Length': 0,
-              'Content-Range': 'bytes */*'
-            });
-
-            cb({
-              code: 308, // resumable upload status code
-              response: { headers: { range: '0-' + lastByte } }
-            });
-
-            return;
-          }
-
-          if (requestCount === 2) {
-            assert.equal(reqOpts.method, 'PUT');
-            assert.equal(reqOpts.uri, RESUMABLE_URI);
-
-            cb.onAuthorized(null, { headers: {} });
-          }
+          return uploadStream;
         };
 
-        var metadata = { a: 'b', c: 'd' };
-        requestOverride = function(reqOpts) {
-          var startByte = lastByte + 1;
-          assert.equal(
-            reqOpts.headers['Content-Range'], 'bytes ' + startByte + '-*/*');
 
-          var stream = through();
+        file.startResumableUpload_(duplexify());
+      });
+
+      it('should emit complete after the stream finishes', function(done) {
+        var dup = duplexify();
+
+        dup.on('complete', done);
+
+        resumableUploadOverride = function() {
+          var uploadStream = through();
           setImmediate(function() {
-            stream.emit('complete', { body: metadata });
+            uploadStream.emit('finish');
           });
-          return stream;
+          return uploadStream;
         };
 
-        var stream = duplexify();
+        file.startResumableUpload_(dup);
+      });
 
-        stream
-          .on('error', done)
-          .on('complete', function(data) {
-            assert.deepEqual(data, metadata);
+      it('should set the writable stream', function(done) {
+        var dup = duplexify();
+        var uploadStream = through();
 
-            setImmediate(function() {
-              // cache deleted.
-              assert(!configStoreData[file.name]);
-              done();
-            });
-          });
+        dup.setWritable = function(stream) {
+          assert.strictEqual(stream, uploadStream);
+          done();
+        };
 
-        file.startResumableUpload_(stream);
+        resumableUploadOverride = function() {
+          return uploadStream;
+        };
+
+        file.startResumableUpload_(dup);
       });
     });
   });
@@ -2012,9 +2089,8 @@ describe('File', function() {
 
       ws
         .on('error', done)
-        .on('complete', function(meta) {
-          assert.deepEqual(meta, metadata);
-          assert.deepEqual(file.metadata, metadata);
+        .on('complete', function() {
+          assert.strictEqual(file.metadata, metadata);
           done();
         });
 

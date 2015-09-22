@@ -16,6 +16,7 @@ This client supports the following Google Cloud Platform services:
 * [Google Cloud Pub/Sub](#google-cloud-pubsub)
 * [Google Cloud Storage](#google-cloud-storage)
 * [Google Compute Engine](#google-compute-engine)
+* [Google Cloud Resource Manager](#google-cloud-resource-manager-beta) (Beta)
 * [Google Cloud Search](#google-cloud-search-alpha) (Alpha)
 
 If you need support for other Google APIs, check out the [Google Node.js API Client library][googleapis].
@@ -33,16 +34,16 @@ $ npm install --save gcloud
 - [gcloud-kvstore][gcloud-kvstore] - Use Datastore as a simple key-value store.
 - [hya-wave][hya-wave] - Cloud-based web sample editor. Part of the [hya-io][hya-io] family of products.
 
-## Authorization
+## Authentication
 
-With `gcloud-node` it's incredibly easy to get authorized and start using Google's APIs. You can set your credentials on a global basis as well as on a per-API basis. See each individual API section below to see how you can auth on a per-API-basis. This is useful if you want to use different accounts for different Google Cloud services.
+With `gcloud-node` it's incredibly easy to get authenticated and start using Google's APIs. You can set your credentials on a global basis as well as on a per-API basis. See each individual API section below to see how you can auth on a per-API-basis. This is useful if you want to use different accounts for different Google Cloud services.
 
 ### On Google Compute Engine
 
-If you are running this client on Google Compute Engine, we handle authorization for you with no configuration. You just need to make sure that when you [set up the GCE instance][gce-how-to], you add the correct scopes for the APIs you want to access.
+If you are running this client on Google Compute Engine, we handle authentication for you with no configuration. You just need to make sure that when you [set up the GCE instance][gce-how-to], you add the correct scopes for the APIs you want to access.
 
 ``` js
-// Authorizing on a global basis.
+// Authenticating on a global basis.
 var projectId = process.env.GCLOUD_PROJECT_ID; // E.g. 'grape-spaceship-123'
 var gcloud = require('gcloud')({
   projectId: projectId
@@ -62,11 +63,11 @@ If you are not running this client on Google Compute Engine, you need a Google D
   * Google Cloud Storage
   * Google Cloud Storage JSON API
 4. Navigate to **APIs & auth** >  **Credentials** and then:
-  * If you want to use a new service account, click on **Create new Client ID** and select **Service account**. After the account is created, you will be prompted to download the JSON key file that the library uses to authorize your requests.
+  * If you want to use a new service account, click on **Create new Client ID** and select **Service account**. After the account is created, you will be prompted to download the JSON key file that the library uses to authenticate your requests.
   * If you want to generate a new key for an existing service account, click on **Generate new JSON key** and download the JSON key file.
 
 ``` js
-// Authorizing on a global basis.
+// Authenticating on a global basis.
 var projectId = process.env.GCLOUD_PROJECT_ID; // E.g. 'grape-spaceship-123'
 
 var gcloud = require('gcloud')({
@@ -90,8 +91,8 @@ You can also set auth on a per-API-instance basis. The examples below show you h
 ```js
 var gcloud = require('gcloud');
 
-// Authorizing on a per-API-basis. You don't need to do this if you auth on a
-// global basis (see Authorization section above).
+// Authenticating on a per-API-basis. You don't need to do this if you auth on a
+// global basis (see Authentication section above).
 var bigquery = gcloud.bigquery({
   projectId: 'my-project',
   keyFilename: '/path/to/keyfile.json'
@@ -126,8 +127,8 @@ job.getQueryResults().on('data', function(row) {});
 ```js
 var gcloud = require('gcloud');
 
-// Authorizing on a per-API-basis. You don't need to do this if you auth on a
-// global basis (see Authorization section above).
+// Authenticating on a per-API-basis. You don't need to do this if you auth on a
+// global basis (see Authentication section above).
 
 var dataset = gcloud.datastore.dataset({
   projectId: 'my-project',
@@ -177,12 +178,12 @@ dataset.save({
 ```js
 var gcloud = require('gcloud');
 
-// Authorizing on a per-API-basis. You don't need to do this if you auth on a
-// global basis (see Authorization section above).
+// Authenticating on a per-API-basis. You don't need to do this if you auth on a
+// global basis (see Authentication section above).
 
 var dns = gcloud.dns({
-  keyFilename: '/path/to/keyfile.json',
-  projectId: 'my-project'
+  projectId: 'my-project',
+  keyFilename: '/path/to/keyfile.json'
 });
 
 // Create a managed zone.
@@ -217,8 +218,8 @@ zone.export('/zonefile.zone', function(err) {});
 ```js
 var gcloud = require('gcloud');
 
-// Authorizing on a per-API-basis. You don't need to do this if you
-// auth on a global basis (see Authorization section above).
+// Authenticating on a per-API-basis. You don't need to do this if you
+// auth on a global basis (see Authentication section above).
 
 var pubsub = gcloud.pubsub({
   projectId: 'my-project',
@@ -260,12 +261,12 @@ topic.subscribe('new-subscription', function(err, subscription) {
 var fs = require('fs');
 var gcloud = require('gcloud');
 
-// Authorizing on a per-API-basis. You don't need to do this if you auth on a
-// global basis (see Authorization section above).
+// Authenticating on a per-API-basis. You don't need to do this if you auth on a
+// global basis (see Authentication section above).
 
 var gcs = gcloud.storage({
-  keyFilename: '/path/to/keyfile.json',
-  projectId: 'my-project'
+  projectId: 'my-project',
+  keyFilename: '/path/to/keyfile.json'
 });
 
 // Create a new bucket.
@@ -311,8 +312,8 @@ localReadStream.pipe(remoteWriteStream);
 ```js
 var gcloud = require('gcloud');
 
-// Authorizing on a per-API-basis. You don't need to do this if you auth on a
-// global basis (see Authorization section above).
+// Authenticating on a per-API-basis. You don't need to do this if you auth on a
+// global basis (see Authentication section above).
 
 var gce = gcloud.compute({
   projectId: 'my-project',
@@ -335,6 +336,42 @@ zone.createVM(name, { os: 'ubuntu' }, function(err, vm, operation) {
 ```
 
 
+## Google Cloud Resource Manager (Beta)
+
+> This is a *Beta* release of Google Cloud Resource Manager. This feature is not covered by any SLA or deprecation policy and may be subject to backward-incompatible changes.
+
+- [API Documentation][gcloud-resource-docs]
+- [Official Documentation][cloud-resource-docs]
+
+#### Preview
+
+```js
+var gcloud = require('gcloud');
+
+// Authorizing on a per-API-basis. You don't need to do this if you auth on a
+// global basis (see Authorization section above).
+
+var resource = gcloud.resource({
+  projectId: 'my-project',
+  keyFilename: '/path/to/keyfile.json'
+});
+
+// Get all of the projects you maintain.
+resource.getProjects(function(err, projects) {
+  if (!err) {
+    // `projects` contains all of your projects.
+  }
+});
+
+// Get the metadata from your project. (defaults to `my-project`)
+var project = resource.project();
+
+project.getMetadata(function(err, metadata) {
+  // `metadata` describes your project.
+});
+```
+
+
 ## Google Cloud Search (Alpha)
 
 > This is an *Alpha* release of Google Cloud Search. This feature is not covered by any SLA or deprecation policy and may be subject to backward-incompatible changes.
@@ -347,12 +384,12 @@ zone.createVM(name, { os: 'ubuntu' }, function(err, vm, operation) {
 ```js
 var gcloud = require('gcloud');
 
-// Authorizing on a per-API-basis. You don't need to do this if you auth on a
-// global basis (see Authorization section above).
+// Authenticating on a per-API-basis. You don't need to do this if you auth on a
+// global basis (see Authentication section above).
 
 var search = gcloud.search({
-  keyFilename: '/path/to/keyfile.json',
-  projectId: 'my-project'
+  projectId: 'my-project',
+  keyFilename: '/path/to/keyfile.json'
 });
 
 // Create a document in a new index.
@@ -396,6 +433,7 @@ Apache 2.0 - See [COPYING](COPYING) for more information.
 [gcloud-datastore-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs/datastore
 [gcloud-dns-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs/dns
 [gcloud-pubsub-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs/pubsub
+[gcloud-resource-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs/resource
 [gcloud-search-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs/search
 [gcloud-storage-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs/storage
 
@@ -420,6 +458,8 @@ Apache 2.0 - See [COPYING](COPYING) for more information.
 [cloud-dns-docs]: https://cloud.google.com/dns/docs
 
 [cloud-pubsub-docs]: https://cloud.google.com/pubsub/docs
+
+[cloud-resource-docs]: https://cloud.google.com/resource-manager
 
 [cloud-search-docs]: https://cloud.google.com/search/
 

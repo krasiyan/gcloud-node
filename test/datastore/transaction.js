@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-/*global describe, it, beforeEach, before, after */
-
 'use strict';
 
 var arrify = require('arrify');
@@ -73,7 +71,7 @@ describe('Transaction', function() {
 
   beforeEach(function() {
     transaction = new Transaction({
-      authorizeReq_: function(req, callback) {
+      authenticateReq_: function(req, callback) {
         return callback(null, req);
       }
     }, 'project-id');
@@ -84,7 +82,7 @@ describe('Transaction', function() {
       var projectId = 'abc';
       var fakeDataset = {
         apiEndpoint: 'http://localhost:8080',
-        makeAuthorizedRequest_: function fakeMakeAuthorizedRequest_() {}
+        makeAuthenticatedRequest_: function fakeMakeAuthenticatedRequest_() {}
       };
 
       var transaction = new Transaction(fakeDataset, projectId);
@@ -92,8 +90,8 @@ describe('Transaction', function() {
       assert.strictEqual(transaction.id, null);
       assert.deepEqual(transaction.apiEndpoint, fakeDataset.apiEndpoint);
       assert.equal(
-        transaction.makeAuthorizedRequest_,
-        fakeDataset.makeAuthorizedRequest_
+        transaction.makeAuthenticatedRequest_,
+        fakeDataset.makeAuthenticatedRequest_
       );
       assert.equal(transaction.projectId, projectId);
     });
@@ -219,6 +217,15 @@ describe('Transaction', function() {
         done();
       };
       transaction.commit_();
+    });
+
+    it('should skip the commit', function(done) {
+      transaction.skipCommit = true;
+
+      // If called, the test will blow up.
+      transaction.makeReq_ = done;
+
+      transaction.commit_(done);
     });
 
     it('should pass error to callback', function(done) {

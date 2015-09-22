@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-/*global describe, it, beforeEach, before, after */
-
 'use strict';
 
 var arrify = require('arrify');
@@ -116,8 +114,8 @@ describe('Request', function() {
     requestOverride = null;
     request = new Request();
     request.apiEndpoint = CUSTOM_ENDPOINT;
-    request.makeAuthorizedRequest_ = function(req, callback) {
-      (callback.onAuthorized || callback)(null, req);
+    request.makeAuthenticatedRequest_ = function(req, callback) {
+      (callback.onAuthenticated || callback)(null, req);
     };
   });
 
@@ -424,20 +422,63 @@ describe('Request', function() {
     it('should save with specific method', function(done) {
       request.makeReq_ = function(method, req, callback) {
         assert.equal(method, 'commit');
+
         assert.equal(req.mutation.insert.length, 1);
         assert.equal(req.mutation.update.length, 1);
-        assert.equal(req.mutation.insert[0].property[0].name, 'k');
-        assert.equal(
-          req.mutation.insert[0].property[0].value.string_value, 'v');
-        assert.equal(req.mutation.update[0].property[0].name, 'k2');
-        assert.equal(
-          req.mutation.update[0].property[0].value.string_value, 'v2');
+        assert.equal(req.mutation.upsert.length, 1);
+        assert.equal(req.mutation.insert_auto_id.length, 1);
+
+        var insert = req.mutation.insert[0];
+        assert.strictEqual(insert.property[0].name, 'k');
+        assert.strictEqual(insert.property[0].value.string_value, 'v');
+
+        var update = req.mutation.update[0];
+        assert.strictEqual(update.property[0].name, 'k2');
+        assert.strictEqual(update.property[0].value.string_value, 'v2');
+
+        var upsert = req.mutation.upsert[0];
+        assert.strictEqual(upsert.property[0].name, 'k3');
+        assert.strictEqual(upsert.property[0].value.string_value, 'v3');
+
+        var insertAutoId = req.mutation.insert_auto_id[0];
+        assert.strictEqual(insertAutoId.property[0].name, 'k4');
+        assert.strictEqual(insertAutoId.property[0].value.string_value, 'v4');
+
         callback();
       };
+
       request.save([
         { key: key, method: 'insert', data: { k: 'v' } },
-        { key: key, method: 'update', data: { k2: 'v2' } }
+        { key: key, method: 'update', data: { k2: 'v2' } },
+        { key: key, method: 'upsert', data: { k3: 'v3' } },
+        { key: key, method: 'insert_auto_id', data: { k4: 'v4' } }
       ], done);
+    });
+
+    it('should not alter the provided data object', function(done) {
+      var entities = [
+        {
+          key: key,
+          method: 'insert',
+          indexed: false,
+          data: {
+            value: {
+              a: 'b',
+              c: [1, 2, 3]
+            }
+          }
+        }
+      ];
+      var expectedEntities = extend(true, {}, entities);
+
+      request.makeReq_ = function() {
+        // By the time the request is made, the original object has already been
+        // transformed into a raw request.
+        assert.deepEqual(entities, expectedEntities);
+        done();
+      };
+
+      request.save(entities, assert.ifError);
     });
 
     it('should return apiResponse in callback', function(done) {
@@ -601,7 +642,7 @@ describe('Request', function() {
     };
 
     beforeEach(function() {
-      query = new Query(['Kind']);
+      query = new Query('namespace', ['Kind']);
     });
 
     describe('errors', function() {
@@ -672,6 +713,17 @@ describe('Request', function() {
         done();
       });
     });
+
+    it('should set a partition_id from a namespace', function(done) {
+      var namespace = 'namespace';
+
+      request.makeReq_ = function(method, req) {
+        assert.strictEqual(req.partition_id.namespace, namespace);
+        done();
+      };
+
+      request.runQuery(query, assert.ifError);
+    });
   });
 
   describe('update', function() {
@@ -715,17 +767,25 @@ describe('Request', function() {
   });
 
   describe('allocateIds', function() {
+    var incompleteKey;
+    var apiResponse = {
+      key: [
+        { path_element: [{ kind: 'Kind', id: 123 }] }
+      ]
+    };
+
+    beforeEach(function() {
+      incompleteKey = new entity.Key({ namespace: null, path: ['Kind'] });
+    });
+
     it('should produce proper allocate IDs req protos', function(done) {
       request.makeReq_ = function(method, req, callback) {
         assert.equal(method, 'allocateIds');
         assert.equal(req.key.length, 1);
-        callback(null, {
-          key: [
-            { path_element: [{ kind: 'Kind', id: 123 }] }
-          ]
-        });
+
+        callback(null, apiResponse);
       };
-      var incompleteKey = new entity.Key({ namespace: null, path: ['Kind'] });
+
       request.allocateIds(incompleteKey, 1, function(err, keys) {
         assert.ifError(err);
         var generatedKey = keys[0];
@@ -734,19 +794,29 @@ describe('Request', function() {
       });
     });
 
-    it('should return apiResponse in callback', function(done) {
-      var resp = {
-        key: [
-          { path_element: [{ kind: 'Kind', id: 123 }] }
-        ]
-      };
+    it('should exec callback with error & API response', function(done) {
+      var error = new Error('Error.');
+
       request.makeReq_ = function(method, req, callback) {
-        callback(null, resp);
+        callback(error, apiResponse);
       };
-      var incompleteKey = new entity.Key({ namespace: null, path: ['Kind'] });
-      request.allocateIds(incompleteKey, 1, function(err, keys, apiResponse) {
+
+      request.allocateIds(incompleteKey, 1, function(err, keys, apiResponse_) {
+        assert.strictEqual(err, error);
+        assert.strictEqual(keys, null);
+        assert.strictEqual(apiResponse_, apiResponse);
+        done();
+      });
+    });
+
+    it('should return apiResponse in callback', function(done) {
+      request.makeReq_ = function(method, req, callback) {
+        callback(null, apiResponse);
+      };
+
+      request.allocateIds(incompleteKey, 1, function(err, keys, apiResponse_) {
         assert.ifError(err);
-        assert.deepEqual(resp, apiResponse);
+        assert.strictEqual(apiResponse_, apiResponse);
         done();
       });
     });
@@ -761,7 +831,7 @@ describe('Request', function() {
   describe('makeReq_', function() {
     beforeEach(function() {
       request.connection = {
-        createAuthorizedReq: util.noop
+        createAuthenticatedReq: util.noop
       };
     });
 
@@ -776,7 +846,7 @@ describe('Request', function() {
         });
 
       request.projectId = projectId;
-      request.makeAuthorizedRequest_ = function(opts) {
+      request.makeAuthenticatedRequest_ = function(opts) {
         assert.equal(opts.method, 'POST');
         assert.equal(opts.uri, expectedUri);
         assert.equal(opts.headers['Content-Type'], 'application/x-protobuf');
@@ -793,10 +863,23 @@ describe('Request', function() {
         done();
         return new stream.Writable();
       };
-      request.makeAuthorizedRequest_ = function(opts, callback) {
-        (callback.onAuthorized || callback)(null, mockRequest);
+      request.makeAuthenticatedRequest_ = function(opts, callback) {
+        (callback.onAuthenticated || callback)(null, mockRequest);
       };
       request.makeReq_('commit', {}, util.noop);
+    });
+
+    it('should execute onAuthenticated with error', function(done) {
+      var error = new Error('Error.');
+
+      request.makeAuthenticatedRequest_ = function(opts, callback) {
+        (callback.onAuthenticated || callback)(error);
+      };
+
+      request.makeReq_('commit', {}, function(err) {
+        assert.strictEqual(err, error);
+        done();
+      });
     });
 
     it('should send protobuf request', function(done) {
@@ -842,8 +925,8 @@ describe('Request', function() {
 
     describe('transactional and non-transactional properties', function() {
       beforeEach(function() {
-        request.createAuthorizedRequest_ = function(opts, callback) {
-          (callback.onAuthorized || callback)();
+        request.createAuthenticatedRequest_ = function(opts, callback) {
+          (callback.onAuthenticated || callback)();
         };
       });
 

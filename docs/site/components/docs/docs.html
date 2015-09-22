@@ -39,12 +39,12 @@ var gcloud = require('gcloud')({
   keyFilename: '/path/to/keyfile.json'
 });</div>
       <p>
-        The full set of options which can be passed to gcloud and sub-modules are <a href="#/authorization">outlined here</a>.
+        The full set of options which can be passed to gcloud and sub-modules are <a href="#/authentication">outlined here</a>.
       </p>
     </article>
     <hr>
 
-    <article ng-repeat="service in ['bigquery', 'compute', 'datastore', 'dns', 'pubsub', 'search', 'storage']"
+    <article ng-repeat="service in ['bigquery', 'compute', 'datastore', 'dns', 'pubsub', 'resource', 'search', 'storage']"
              ng-if="isActiveDoc(service)"
              ng-include="'site/components/docs/' + service + '-overview.html'">
     </article>

@@ -80,11 +80,6 @@ describe('File', function() {
   var bucket;
 
   before(function() {
-    // If we don't stub see4_crc32 and use mockery, we get "Module did not self-
-    // register".
-    var crc32c = require('hash-stream-validation/node_modules/sse4_crc32');
-    mockery.registerMock('sse4_crc32', crc32c);
-
     mockery.registerMock('request', fakeRequest);
     mockery.registerMock('gcs-resumable-upload', fakeResumableUpload);
     mockery.registerMock('../common/util.js', fakeUtil);
@@ -783,6 +778,17 @@ describe('File', function() {
           .resume();
       });
 
+      it('should ignore a data mismatch if validation: false', function(done) {
+        requestOverride = getFakeSuccessfulRequest(data, {
+          headers: { 'x-goog-hash': 'md5=fakefakefake' }
+        });
+
+        file.createReadStream({ validation: false })
+          .resume()
+          .on('error', done)
+          .on('end', done);
+      });
+
       describe('destroying the through stream', function() {
         it('should destroy after failed validation', function(done) {
           requestOverride = getFakeSuccessfulRequest(
@@ -1147,6 +1153,23 @@ describe('File', function() {
         });
       });
 
+      it('should ignore a data mismatch if validation: false', function(done) {
+        var writable = file.createWriteStream({ validation: false });
+
+        file.startResumableUpload_ = function(stream) {
+          setImmediate(function() {
+            file.metadata = { md5Hash: 'bad-hash' };
+            stream.emit('complete');
+          });
+        };
+
+        writable.write(data);
+        writable.end();
+
+        writable.on('error', done);
+        writable.on('finish', done);
+      });
+
       it('should delete the file if validation fails', function(done) {
         var writable = file.createWriteStream();
 
@@ -1499,9 +1522,8 @@ describe('File', function() {
       file.getSignedPolicy({
         expires: Date.now() + 5
       }, function(err) {
-        var errorMessage = 'Signing failed. See `error` property.';
-        assert.strictEqual(err.message, errorMessage);
-        assert.strictEqual(err.error, error);
+        assert.strictEqual(err.name, 'SigningError');
+        assert.strictEqual(err.message, error.message);
         done();
       });
     });
@@ -1516,10 +1538,11 @@ describe('File', function() {
         expires: Date.now() + 5
       }, function(err) {
         var errorMessage = [
-          'Signing failed. Could not find a `private_key`.',
+          'Could not find a `private_key`.',
           'Please verify you are authorized with this property available.'
         ].join(' ');
 
+        assert.strictEqual(err.name, 'SigningError');
         assert.strictEqual(err.message, errorMessage);
         done();
       });
@@ -1789,9 +1812,8 @@ describe('File', function() {
         action: 'read',
         expires: Date.now() + 5
       }, function(err) {
-        var errorMessage = 'Signing failed. See `error` property.';
-        assert.strictEqual(err.message, errorMessage);
-        assert.strictEqual(err.error, error);
+        assert.strictEqual(err.name, 'SigningError');
+        assert.strictEqual(err.message, error.message);
         done();
       });
     });
@@ -1807,10 +1829,11 @@ describe('File', function() {
         expires: Date.now() + 5
       }, function(err) {
         var errorMessage = [
-          'Signing failed. Could not find a `private_key` or `client_email`.',
+          'Could not find a `private_key` or `client_email`.',
           'Please verify you are authorized with these credentials available.'
         ].join(' ');
 
+        assert.strictEqual(err.name, 'SigningError');
         assert.strictEqual(err.message, errorMessage);
         done();
       });
